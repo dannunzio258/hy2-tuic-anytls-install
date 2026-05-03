@@ -78,30 +78,30 @@ rand_uuid() {
   fi
 }
 
-ask() {
-  prompt="$1"
-  def="$2"
+read_tty() {
   if [ -r /dev/tty ] && [ -w /dev/tty ]; then
-    printf '%s [%s]: ' "$prompt" "$def" >/dev/tty
     read -r ans </dev/tty || ans=""
   else
-    printf '%s [%s]: ' "$prompt" "$def" >&2
-    read -r ans || ans=""
+    die "当前没有可交互终端，请使用：curl -fsSL 脚本地址 -o /tmp/install.sh && sh /tmp/install.sh"
   fi
-  [ -n "$ans" ] && printf '%s' "$ans" || printf '%s' "$def"
+}
+
+ask_var() {
+  var="$1"
+  prompt="$2"
+  def="$3"
+  printf '%s [%s]: ' "$prompt" "$def" >/dev/tty
+  read_tty
+  [ -n "$ans" ] || ans="$def"
+  eval "$var=\$ans"
 }
 
 ask_yes_no() {
   prompt="$1"
   def="$2"
   while :; do
-    if [ -r /dev/tty ] && [ -w /dev/tty ]; then
-      printf '%s [%s]: ' "$prompt" "$def" >/dev/tty
-      read -r ans </dev/tty || ans=""
-    else
-      printf '%s [%s]: ' "$prompt" "$def" >&2
-      read -r ans || ans=""
-    fi
+    printf '%s [%s]: ' "$prompt" "$def" >/dev/tty
+    read_tty
     [ -z "$ans" ] && ans="$def"
     case "$ans" in
       y|Y|yes|YES|是) return 0 ;;
@@ -119,13 +119,14 @@ valid_port() {
   [ "$p" -ge 1 ] 2>/dev/null && [ "$p" -le 65535 ] 2>/dev/null
 }
 
-ask_port() {
-  name="$1"
-  def="$2"
+ask_port_var() {
+  var="$1"
+  name="$2"
+  def="$3"
   while :; do
-    p="$(ask "$name" "$def")"
-    if valid_port "$p"; then
-      printf '%s' "$p"
+    ask_var __PORT_VALUE "$name" "$def"
+    if valid_port "$__PORT_VALUE"; then
+      eval "$var=\$__PORT_VALUE"
       return
     fi
     yellow "端口必须是 1-65535 的数字"
@@ -202,20 +203,20 @@ collect_inputs() {
   server_addr="$(get_ip)"
   info ""
   info "请按提示填写配置，直接回车使用默认值。"
-  SERVER="$(ask "服务器地址/IP（用于客户端导入）" "$server_addr")"
-  SNI="$(ask "TLS SNI/证书域名（自签可随意，建议填域名）" "www.bing.com")"
-  HY2_PORT="$(ask_port "Hysteria2 UDP 端口" "8443")"
-  TUIC_PORT="$(ask_port "TUIC v5 UDP 端口" "9443")"
-  ANYTLS_PORT="$(ask_port "AnyTLS TCP 端口" "7443")"
-  HY2_UP="$(ask "Hysteria2 上行 Mbps（小鸡建议 50）" "50")"
-  HY2_DOWN="$(ask "Hysteria2 下行 Mbps（小鸡建议 100）" "100")"
-  REMARK_PREFIX="$(ask "节点名称前缀" "SB")"
+  ask_var SERVER "服务器地址/IP（用于客户端导入）" "$server_addr"
+  ask_var SNI "TLS SNI/证书域名（自签可随意，建议填域名）" "www.bing.com"
+  ask_port_var HY2_PORT "Hysteria2 UDP 端口" "8443"
+  ask_port_var TUIC_PORT "TUIC v5 UDP 端口" "9443"
+  ask_port_var ANYTLS_PORT "AnyTLS TCP 端口" "7443"
+  ask_var HY2_UP "Hysteria2 上行 Mbps（小鸡建议 50）" "50"
+  ask_var HY2_DOWN "Hysteria2 下行 Mbps（小鸡建议 100）" "100"
+  ask_var REMARK_PREFIX "节点名称前缀" "SB"
 
   HY2_JUMP="n"
   HY2_JUMP_RANGE=""
   if ask_yes_no "是否开启 Hysteria2 端口跳跃（UDP 端口段转发到 HY2 主端口）" "n"; then
     HY2_JUMP="y"
-    HY2_JUMP_RANGE="$(ask "请输入跳跃端口范围，例如 20000:30000" "20000:30000")"
+    ask_var HY2_JUMP_RANGE "请输入跳跃端口范围，例如 20000:30000" "20000:30000"
     case "$HY2_JUMP_RANGE" in
       *:*) : ;;
       *) die "端口跳跃范围格式错误，应类似 20000:30000" ;;
