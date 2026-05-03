@@ -39,9 +39,11 @@ detect_os() {
         *) yellow "提示：当前 Debian 版本为 $OS_VER，脚本按 Debian 12 方式继续。" ;;
       esac
       INIT="systemd"
+      SINGBOX_FLAVOR="glibc"
       ;;
     alpine)
       INIT="openrc"
+      SINGBOX_FLAVOR="musl"
       ;;
     *)
       die "当前系统 $OS_ID 暂不支持，仅支持 Debian 12 / Alpine"
@@ -189,7 +191,11 @@ install_sing_box() {
 
   tmp="/tmp/sing-box-install.$$"
   mkdir -p "$tmp"
-  url="https://github.com/SagerNet/sing-box/releases/download/v${tag}/sing-box-${tag}-linux-${file_arch}.tar.gz"
+  if [ "$SINGBOX_FLAVOR" = "musl" ]; then
+    url="https://github.com/SagerNet/sing-box/releases/download/v${tag}/sing-box-${tag}-linux-${file_arch}-musl.tar.gz"
+  else
+    url="https://github.com/SagerNet/sing-box/releases/download/v${tag}/sing-box-${tag}-linux-${file_arch}.tar.gz"
+  fi
   curl -fL --retry 3 --connect-timeout 10 -o "$tmp/sing-box.tar.gz" "$url" || die "下载 sing-box 失败：$url"
   tar -xzf "$tmp/sing-box.tar.gz" -C "$tmp"
   found="$(find "$tmp" -type f -name sing-box | head -n 1)"
