@@ -63,9 +63,7 @@ rand_hex() {
 }
 
 rand_uuid() {
-  if [ -x "$BIN" ]; then
-    "$BIN" generate uuid
-  elif [ -r /proc/sys/kernel/random/uuid ]; then
+  if [ -r /proc/sys/kernel/random/uuid ]; then
     cat /proc/sys/kernel/random/uuid
   else
     h="$(openssl rand -hex 16)"
