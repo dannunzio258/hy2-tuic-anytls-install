@@ -299,6 +299,9 @@ write_config() {
       "tls": {
         "enabled": true,
         "server_name": "$SNI",
+        "alpn": [
+          "h3"
+        ],
         "certificate_path": "$CERT",
         "key_path": "$KEY"
       }
