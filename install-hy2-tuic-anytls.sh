@@ -124,9 +124,11 @@ ask_port_var() {
   ASK_PORT_NAME="$2"
   ASK_PORT_DEFAULT="$3"
   while :; do
-    ask_var __PORT_VALUE "$ASK_PORT_NAME" "$ASK_PORT_DEFAULT"
-    if valid_port "$__PORT_VALUE"; then
-      eval "$ASK_PORT_TARGET=\$__PORT_VALUE"
+    printf '%s [%s]: ' "$ASK_PORT_NAME" "$ASK_PORT_DEFAULT" >/dev/tty
+    read_tty
+    [ -n "$ans" ] || ans="$ASK_PORT_DEFAULT"
+    if valid_port "$ans"; then
+      eval "$ASK_PORT_TARGET=\$ans"
       return
     fi
     yellow "端口必须是 1-65535 的数字"
