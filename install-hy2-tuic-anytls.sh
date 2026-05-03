@@ -405,6 +405,7 @@ depend() {
 }
 
 start_pre() {
+  :
 EOF
   if [ "$HY2_JUMP" = "y" ]; then
     cat >> /etc/init.d/${SERVICE_NAME} <<EOF
@@ -416,6 +417,7 @@ EOF
 }
 
 stop_post() {
+  :
 EOF
   if [ "$HY2_JUMP" = "y" ]; then
     cat >> /etc/init.d/${SERVICE_NAME} <<EOF
