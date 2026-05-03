@@ -1,0 +1,485 @@
+#!/bin/sh
+
+# Debian 12 / Alpine one-click sing-box server for Hysteria2, TUIC v5 and AnyTLS.
+# Chinese interactive prompts, low dependency footprint, v2rayN share links output.
+
+set -eu
+
+BASE_DIR="/etc/sing-box"
+CONF="$BASE_DIR/config.json"
+META="$BASE_DIR/client-info.env"
+CERT="$BASE_DIR/server.crt"
+KEY="$BASE_DIR/server.key"
+BIN="/usr/local/bin/sing-box"
+SERVICE_NAME="sing-box"
+
+red() { printf '\033[31m%s\033[0m\n' "$*"; }
+green() { printf '\033[32m%s\033[0m\n' "$*"; }
+yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
+info() { printf '%s\n' "$*"; }
+
+die() {
+  red "错误：$*"
+  exit 1
+}
+
+need_root() {
+  [ "$(id -u)" = "0" ] || die "请使用 root 用户运行：sudo sh $0"
+}
+
+detect_os() {
+  [ -r /etc/os-release ] || die "无法识别系统，仅支持 Debian 12 和 Alpine"
+  . /etc/os-release
+  OS_ID="${ID:-}"
+  OS_VER="${VERSION_ID:-}"
+  case "$OS_ID" in
+    debian)
+      case "$OS_VER" in
+        12*|bookworm*) : ;;
+        *) yellow "提示：当前 Debian 版本为 $OS_VER，脚本按 Debian 12 方式继续。" ;;
+      esac
+      INIT="systemd"
+      ;;
+    alpine)
+      INIT="openrc"
+      ;;
+    *)
+      die "当前系统 $OS_ID 暂不支持，仅支持 Debian 12 / Alpine"
+      ;;
+  esac
+}
+
+detect_arch() {
+  case "$(uname -m)" in
+    x86_64|amd64) ARCH="amd64" ;;
+    aarch64|arm64) ARCH="arm64" ;;
+    armv7l|armv7*) ARCH="armv7" ;;
+    *) die "不支持的 CPU 架构：$(uname -m)" ;;
+  esac
+}
+
+rand_hex() {
+  openssl rand -hex "$1"
+}
+
+rand_uuid() {
+  if command -v sing-box >/dev/null 2>&1; then
+    sing-box generate uuid
+  elif [ -r /proc/sys/kernel/random/uuid ]; then
+    cat /proc/sys/kernel/random/uuid
+  else
+    h="$(openssl rand -hex 16)"
+    printf '%s-%s-%s-%s-%s\n' \
+      "$(printf '%s' "$h" | cut -c1-8)" \
+      "$(printf '%s' "$h" | cut -c9-12)" \
+      "$(printf '%s' "$h" | cut -c13-16)" \
+      "$(printf '%s' "$h" | cut -c17-20)" \
+      "$(printf '%s' "$h" | cut -c21-32)"
+  fi
+}
+
+ask() {
+  prompt="$1"
+  def="$2"
+  printf '%s [%s]: ' "$prompt" "$def"
+  read -r ans || ans=""
+  [ -n "$ans" ] && printf '%s' "$ans" || printf '%s' "$def"
+}
+
+ask_yes_no() {
+  prompt="$1"
+  def="$2"
+  while :; do
+    printf '%s [%s]: ' "$prompt" "$def"
+    read -r ans || ans=""
+    [ -z "$ans" ] && ans="$def"
+    case "$ans" in
+      y|Y|yes|YES|是) return 0 ;;
+      n|N|no|NO|否) return 1 ;;
+      *) yellow "请输入 y 或 n" ;;
+    esac
+  done
+}
+
+valid_port() {
+  p="$1"
+  case "$p" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$p" -ge 1 ] 2>/dev/null && [ "$p" -le 65535 ] 2>/dev/null
+}
+
+ask_port() {
+  name="$1"
+  def="$2"
+  while :; do
+    p="$(ask "$name" "$def")"
+    if valid_port "$p"; then
+      printf '%s' "$p"
+      return
+    fi
+    yellow "端口必须是 1-65535 的数字"
+  done
+}
+
+urlencode() {
+  # Share-link safe for generated secrets. Also handles custom remarks/SNI conservatively.
+  s="$1"
+  out=""
+  i=1
+  len=${#s}
+  while [ "$i" -le "$len" ]; do
+    c=$(printf '%s' "$s" | cut -c "$i")
+    case "$c" in
+      [a-zA-Z0-9.~_-]) out="$out$c" ;;
+      ' ') out="$out%20" ;;
+      *) out="$out$(printf '%%%02X' "'${c}")" ;;
+    esac
+    i=$((i + 1))
+  done
+  printf '%s' "$out"
+}
+
+get_ip() {
+  ip=""
+  ip="$(curl -4fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+  [ -n "$ip" ] || ip="$(curl -4fsS --max-time 5 https://ifconfig.me 2>/dev/null || true)"
+  [ -n "$ip" ] || ip="请手动替换为服务器IP或域名"
+  printf '%s' "$ip"
+}
+
+install_deps() {
+  info "正在安装基础依赖..."
+  if [ "$OS_ID" = "debian" ]; then
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl tar openssl iptables
+  else
+    apk add --no-cache ca-certificates curl tar openssl iptables
+  fi
+}
+
+install_sing_box() {
+  if [ -x "$BIN" ]; then
+    cur="$($BIN version 2>/dev/null | awk 'NR==1{print $3}' || true)"
+    [ -n "$cur" ] && green "检测到已安装 sing-box $cur，将继续覆盖配置。" || green "检测到已安装 sing-box，将继续覆盖配置。"
+    return
+  fi
+
+  info "正在下载 sing-box 最新版..."
+  api="$(curl -fsSL --max-time 20 https://api.github.com/repos/SagerNet/sing-box/releases/latest)" || die "获取 sing-box 最新版本失败"
+  tag="$(printf '%s' "$api" | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p' | head -n 1)"
+  [ -n "$tag" ] || die "解析 sing-box 最新版本失败"
+
+  case "$ARCH" in
+    amd64) file_arch="amd64" ;;
+    arm64) file_arch="arm64" ;;
+    armv7) file_arch="armv7" ;;
+  esac
+
+  tmp="/tmp/sing-box-install.$$"
+  mkdir -p "$tmp"
+  url="https://github.com/SagerNet/sing-box/releases/download/v${tag}/sing-box-${tag}-linux-${file_arch}.tar.gz"
+  curl -fL --retry 3 --connect-timeout 10 -o "$tmp/sing-box.tar.gz" "$url" || die "下载 sing-box 失败：$url"
+  tar -xzf "$tmp/sing-box.tar.gz" -C "$tmp"
+  found="$(find "$tmp" -type f -name sing-box | head -n 1)"
+  [ -n "$found" ] || die "解压后未找到 sing-box"
+  install -m 0755 "$found" "$BIN"
+  rm -rf "$tmp"
+  green "sing-box 安装完成：$($BIN version | awk 'NR==1{print $0}')"
+}
+
+collect_inputs() {
+  server_addr="$(get_ip)"
+  info ""
+  info "请按提示填写配置，直接回车使用默认值。"
+  SERVER="$(ask "服务器地址/IP（用于客户端导入）" "$server_addr")"
+  SNI="$(ask "TLS SNI/证书域名（自签可随意，建议填域名）" "www.bing.com")"
+  HY2_PORT="$(ask_port "Hysteria2 UDP 端口" "8443")"
+  TUIC_PORT="$(ask_port "TUIC v5 UDP 端口" "9443")"
+  ANYTLS_PORT="$(ask_port "AnyTLS TCP 端口" "7443")"
+  HY2_UP="$(ask "Hysteria2 上行 Mbps（小鸡建议 50）" "50")"
+  HY2_DOWN="$(ask "Hysteria2 下行 Mbps（小鸡建议 100）" "100")"
+  REMARK_PREFIX="$(ask "节点名称前缀" "SB")"
+
+  HY2_JUMP="n"
+  HY2_JUMP_RANGE=""
+  if ask_yes_no "是否开启 Hysteria2 端口跳跃（UDP 端口段转发到 HY2 主端口）" "n"; then
+    HY2_JUMP="y"
+    HY2_JUMP_RANGE="$(ask "请输入跳跃端口范围，例如 20000:30000" "20000:30000")"
+    case "$HY2_JUMP_RANGE" in
+      *:*) : ;;
+      *) die "端口跳跃范围格式错误，应类似 20000:30000" ;;
+    esac
+  fi
+
+  HY2_PASS="$(rand_hex 16)"
+  HY2_OBFS="$(rand_hex 8)"
+  TUIC_UUID="$(rand_uuid)"
+  TUIC_PASS="$(rand_hex 16)"
+  ANYTLS_PASS="$(rand_hex 16)"
+}
+
+write_cert() {
+  mkdir -p "$BASE_DIR"
+  chmod 700 "$BASE_DIR"
+  if [ ! -s "$CERT" ] || [ ! -s "$KEY" ]; then
+    info "正在生成自签 TLS 证书..."
+    openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
+      -keyout "$KEY" -out "$CERT" -subj "/CN=$SNI" >/dev/null 2>&1
+    chmod 600 "$KEY"
+  fi
+}
+
+write_config() {
+  info "正在写入 sing-box 配置..."
+  cat > "$CONF" <<EOF
+{
+  "log": {
+    "disabled": false,
+    "level": "warn",
+    "timestamp": false
+  },
+  "inbounds": [
+    {
+      "type": "hysteria2",
+      "tag": "hy2-in",
+      "listen": "0.0.0.0",
+      "listen_port": $HY2_PORT,
+      "up_mbps": $HY2_UP,
+      "down_mbps": $HY2_DOWN,
+      "obfs": {
+        "type": "salamander",
+        "password": "$HY2_OBFS"
+      },
+      "users": [
+        {
+          "name": "hy2",
+          "password": "$HY2_PASS"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "$SNI",
+        "certificate_path": "$CERT",
+        "key_path": "$KEY"
+      }
+    },
+    {
+      "type": "tuic",
+      "tag": "tuic-in",
+      "listen": "0.0.0.0",
+      "listen_port": $TUIC_PORT,
+      "users": [
+        {
+          "name": "tuic",
+          "uuid": "$TUIC_UUID",
+          "password": "$TUIC_PASS"
+        }
+      ],
+      "congestion_control": "bbr",
+      "auth_timeout": "3s",
+      "zero_rtt_handshake": false,
+      "heartbeat": "10s",
+      "tls": {
+        "enabled": true,
+        "server_name": "$SNI",
+        "certificate_path": "$CERT",
+        "key_path": "$KEY"
+      }
+    },
+    {
+      "type": "anytls",
+      "tag": "anytls-in",
+      "listen": "0.0.0.0",
+      "listen_port": $ANYTLS_PORT,
+      "users": [
+        {
+          "name": "anytls",
+          "password": "$ANYTLS_PASS"
+        }
+      ],
+      "padding_scheme": [],
+      "tls": {
+        "enabled": true,
+        "server_name": "$SNI",
+        "certificate_path": "$CERT",
+        "key_path": "$KEY"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ]
+}
+EOF
+
+  cat > "$META" <<EOF
+SERVER='$SERVER'
+SNI='$SNI'
+HY2_PORT='$HY2_PORT'
+TUIC_PORT='$TUIC_PORT'
+ANYTLS_PORT='$ANYTLS_PORT'
+HY2_PASS='$HY2_PASS'
+HY2_OBFS='$HY2_OBFS'
+TUIC_UUID='$TUIC_UUID'
+TUIC_PASS='$TUIC_PASS'
+ANYTLS_PASS='$ANYTLS_PASS'
+REMARK_PREFIX='$REMARK_PREFIX'
+HY2_JUMP='$HY2_JUMP'
+HY2_JUMP_RANGE='$HY2_JUMP_RANGE'
+EOF
+  chmod 600 "$CONF" "$META"
+}
+
+write_systemd_service() {
+  pre=""
+  if [ "$HY2_JUMP" = "y" ]; then
+    pre="ExecStartPre=-/usr/sbin/iptables -t nat -D PREROUTING -p udp --dport $HY2_JUMP_RANGE -j REDIRECT --to-ports $HY2_PORT\nExecStartPre=/usr/sbin/iptables -t nat -A PREROUTING -p udp --dport $HY2_JUMP_RANGE -j REDIRECT --to-ports $HY2_PORT\nExecStopPost=-/usr/sbin/iptables -t nat -D PREROUTING -p udp --dport $HY2_JUMP_RANGE -j REDIRECT --to-ports $HY2_PORT"
+  fi
+
+  cat > /etc/systemd/system/${SERVICE_NAME}.service <<EOF
+[Unit]
+Description=sing-box service
+Documentation=https://sing-box.sagernet.org
+After=network.target nss-lookup.target
+
+[Service]
+Type=simple
+User=root
+LimitNOFILE=65535
+$(printf '%b' "$pre")
+ExecStart=$BIN run -c $CONF
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable --now "$SERVICE_NAME"
+}
+
+write_openrc_service() {
+  cat > /etc/init.d/${SERVICE_NAME} <<EOF
+#!/sbin/openrc-run
+
+name="sing-box"
+description="sing-box service"
+command="$BIN"
+command_args="run -c $CONF"
+command_background="yes"
+pidfile="/run/sing-box.pid"
+output_log="/var/log/sing-box.log"
+error_log="/var/log/sing-box.log"
+
+depend() {
+  need net
+  after firewall
+}
+
+start_pre() {
+EOF
+  if [ "$HY2_JUMP" = "y" ]; then
+    cat >> /etc/init.d/${SERVICE_NAME} <<EOF
+  iptables -t nat -D PREROUTING -p udp --dport $HY2_JUMP_RANGE -j REDIRECT --to-ports $HY2_PORT 2>/dev/null || true
+  iptables -t nat -A PREROUTING -p udp --dport $HY2_JUMP_RANGE -j REDIRECT --to-ports $HY2_PORT
+EOF
+  fi
+  cat >> /etc/init.d/${SERVICE_NAME} <<EOF
+}
+
+stop_post() {
+EOF
+  if [ "$HY2_JUMP" = "y" ]; then
+    cat >> /etc/init.d/${SERVICE_NAME} <<EOF
+  iptables -t nat -D PREROUTING -p udp --dport $HY2_JUMP_RANGE -j REDIRECT --to-ports $HY2_PORT 2>/dev/null || true
+EOF
+  fi
+  cat >> /etc/init.d/${SERVICE_NAME} <<EOF
+}
+EOF
+  chmod +x /etc/init.d/${SERVICE_NAME}
+  rc-update add "$SERVICE_NAME" default >/dev/null 2>&1 || true
+  rc-service "$SERVICE_NAME" restart
+}
+
+check_config() {
+  info "正在检查配置..."
+  "$BIN" check -c "$CONF" || die "sing-box 配置检查失败"
+}
+
+restart_service() {
+  if [ "$INIT" = "systemd" ]; then
+    write_systemd_service
+    systemctl restart "$SERVICE_NAME"
+    systemctl is-active --quiet "$SERVICE_NAME" || die "sing-box 启动失败，请查看：journalctl -u sing-box -e"
+  else
+    write_openrc_service
+    rc-service "$SERVICE_NAME" status >/dev/null 2>&1 || die "sing-box 启动失败，请查看：cat /var/log/sing-box.log"
+  fi
+}
+
+print_links() {
+  e_server="$(urlencode "$SERVER")"
+  e_sni="$(urlencode "$SNI")"
+  e_hy2_pass="$(urlencode "$HY2_PASS")"
+  e_hy2_obfs="$(urlencode "$HY2_OBFS")"
+  e_tuic_pass="$(urlencode "$TUIC_PASS")"
+  e_anytls_pass="$(urlencode "$ANYTLS_PASS")"
+  e_r_hy2="$(urlencode "$REMARK_PREFIX-HY2")"
+  e_r_tuic="$(urlencode "$REMARK_PREFIX-TUIC5")"
+  e_r_anytls="$(urlencode "$REMARK_PREFIX-AnyTLS")"
+
+  hy2_extra=""
+  if [ "$HY2_JUMP" = "y" ]; then
+    hy2_extra="&mport=$(urlencode "$HY2_JUMP_RANGE")"
+  fi
+
+  hy2_link="hysteria2://${e_hy2_pass}@${e_server}:${HY2_PORT}/?sni=${e_sni}&insecure=1&obfs=salamander&obfs-password=${e_hy2_obfs}${hy2_extra}#${e_r_hy2}"
+  tuic_link="tuic://${TUIC_UUID}:${e_tuic_pass}@${e_server}:${TUIC_PORT}/?sni=${e_sni}&alpn=h3&allow_insecure=1&congestion_control=bbr&udp_relay_mode=native#${e_r_tuic}"
+  anytls_link="anytls://${e_anytls_pass}@${e_server}:${ANYTLS_PORT}/?security=tls&sni=${e_sni}&insecure=1#${e_r_anytls}"
+
+  cat > "$BASE_DIR/v2rayn-links.txt" <<EOF
+$hy2_link
+$tuic_link
+$anytls_link
+EOF
+  chmod 600 "$BASE_DIR/v2rayn-links.txt"
+
+  green ""
+  green "安装完成。以下链接可复制到 v2rayN 导入："
+  info ""
+  info "Hysteria2:"
+  info "$hy2_link"
+  info ""
+  info "TUIC v5:"
+  info "$tuic_link"
+  info ""
+  info "AnyTLS:"
+  info "$anytls_link"
+  info ""
+  info "链接已保存：$BASE_DIR/v2rayn-links.txt"
+  info "服务端配置：$CONF"
+  info ""
+  yellow "注意：HY2/TUIC 使用 UDP，AnyTLS 使用 TCP。若 VPS 厂商有安全组，请放行对应端口。自签证书需要客户端允许不安全证书。"
+}
+
+main() {
+  need_root
+  detect_os
+  detect_arch
+  install_deps
+  install_sing_box
+  collect_inputs
+  write_cert
+  write_config
+  check_config
+  restart_service
+  print_links
+}
+
+main "$@"
