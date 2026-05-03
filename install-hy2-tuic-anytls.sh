@@ -493,6 +493,168 @@ EOF
   yellow "注意：HY2/TUIC 使用 UDP，AnyTLS 使用 TCP。若 VPS 厂商有安全组，请放行对应端口。自签证书需要客户端允许不安全证书。"
 }
 
+write_manager() {
+  cat > /usr/local/bin/sb <<'EOF'
+#!/bin/sh
+
+set -eu
+
+BASE_DIR="/etc/sing-box"
+META="$BASE_DIR/client-info.env"
+LINKS="$BASE_DIR/v2rayn-links.txt"
+SERVICE_NAME="sing-box"
+
+red() { printf '\033[31m%s\033[0m\n' "$*"; }
+green() { printf '\033[32m%s\033[0m\n' "$*"; }
+info() { printf '%s\n' "$*"; }
+
+die() {
+  red "错误：$*"
+  exit 1
+}
+
+detect_init() {
+  if command -v systemctl >/dev/null 2>&1; then
+    INIT="systemd"
+  elif command -v rc-service >/dev/null 2>&1; then
+    INIT="openrc"
+  else
+    die "无法识别服务管理器，仅支持 systemd / OpenRC"
+  fi
+}
+
+usage() {
+  cat <<EOL
+用法：sb [命令]
+
+可用命令：
+  show       显示 v2rayN 导入链接，默认命令
+  status     查看 sing-box 运行状态
+  restart    重启 sing-box 服务
+  log        查看 sing-box 日志
+  help       显示此帮助
+
+示例：
+  sb
+  sb show
+  sb status
+  sb restart
+  sb log
+EOL
+}
+
+urlencode() {
+  s="$1"
+  out=""
+  i=1
+  len=${#s}
+  while [ "$i" -le "$len" ]; do
+    c=$(printf '%s' "$s" | cut -c "$i")
+    case "$c" in
+      [a-zA-Z0-9.~_-]) out="$out$c" ;;
+      ' ') out="$out%20" ;;
+      *) out="$out$(printf '%%%02X' "'${c}")" ;;
+    esac
+    i=$((i + 1))
+  done
+  printf '%s' "$out"
+}
+
+print_links() {
+  [ -r "$META" ] || die "未找到节点信息：$META，请先运行安装脚本"
+  # shellcheck disable=SC1090
+  . "$META"
+
+  e_server="$(urlencode "$SERVER")"
+  e_sni="$(urlencode "$SNI")"
+  e_hy2_pass="$(urlencode "$HY2_PASS")"
+  e_hy2_obfs="$(urlencode "$HY2_OBFS")"
+  e_tuic_pass="$(urlencode "$TUIC_PASS")"
+  e_anytls_pass="$(urlencode "$ANYTLS_PASS")"
+  e_r_hy2="$(urlencode "$REMARK_PREFIX-HY2")"
+  e_r_tuic="$(urlencode "$REMARK_PREFIX-TUIC5")"
+  e_r_anytls="$(urlencode "$REMARK_PREFIX-AnyTLS")"
+
+  hy2_extra=""
+  if [ "${HY2_JUMP:-n}" = "y" ]; then
+    hy2_extra="&mport=$(urlencode "$HY2_JUMP_RANGE")"
+  fi
+
+  hy2_link="hysteria2://${e_hy2_pass}@${e_server}:${HY2_PORT}/?sni=${e_sni}&insecure=1&obfs=salamander&obfs-password=${e_hy2_obfs}${hy2_extra}#${e_r_hy2}"
+  tuic_link="tuic://${TUIC_UUID}:${e_tuic_pass}@${e_server}:${TUIC_PORT}/?sni=${e_sni}&alpn=h3&allow_insecure=1&congestion_control=bbr&udp_relay_mode=native#${e_r_tuic}"
+  anytls_link="anytls://${e_anytls_pass}@${e_server}:${ANYTLS_PORT}/?security=tls&sni=${e_sni}&insecure=1#${e_r_anytls}"
+
+  umask 077
+  cat > "$LINKS" <<EOL
+$hy2_link
+$tuic_link
+$anytls_link
+EOL
+
+  green "节点信息如下，可复制到 v2rayN 导入："
+  info ""
+  info "Hysteria2:"
+  info "$hy2_link"
+  info ""
+  info "TUIC v5:"
+  info "$tuic_link"
+  info ""
+  info "AnyTLS:"
+  info "$anytls_link"
+  info ""
+  info "链接已保存：$LINKS"
+}
+
+show_status() {
+  detect_init
+  if [ "$INIT" = "systemd" ]; then
+    systemctl status "$SERVICE_NAME" --no-pager
+  else
+    rc-service "$SERVICE_NAME" status
+  fi
+}
+
+restart_service() {
+  detect_init
+  if [ "$INIT" = "systemd" ]; then
+    systemctl restart "$SERVICE_NAME"
+    systemctl status "$SERVICE_NAME" --no-pager
+  else
+    rc-service "$SERVICE_NAME" restart
+    rc-service "$SERVICE_NAME" status
+  fi
+}
+
+show_log() {
+  detect_init
+  if [ "$INIT" = "systemd" ]; then
+    journalctl -u "$SERVICE_NAME" -e --no-pager
+  else
+    if [ -s /var/log/sing-box.log ]; then
+      cat /var/log/sing-box.log
+    else
+      die "未找到日志文件：/var/log/sing-box.log"
+    fi
+  fi
+}
+
+cmd="${1:-show}"
+case "$cmd" in
+  show) print_links ;;
+  status) show_status ;;
+  restart) restart_service ;;
+  log) show_log ;;
+  help|-h|--help) usage ;;
+  *)
+    red "未知命令：$cmd"
+    usage
+    exit 1
+    ;;
+esac
+EOF
+  chmod 755 /usr/local/bin/sb
+}
+
 main() {
   need_root
   detect_os
@@ -504,6 +666,7 @@ main() {
   write_config
   check_config
   restart_service
+  write_manager
   print_links
 }
 
