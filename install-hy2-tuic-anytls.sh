@@ -63,8 +63,8 @@ rand_hex() {
 }
 
 rand_uuid() {
-  if command -v sing-box >/dev/null 2>&1; then
-    sing-box generate uuid
+  if [ -x "$BIN" ]; then
+    "$BIN" generate uuid
   elif [ -r /proc/sys/kernel/random/uuid ]; then
     cat /proc/sys/kernel/random/uuid
   else
