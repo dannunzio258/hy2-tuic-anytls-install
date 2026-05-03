@@ -81,8 +81,13 @@ rand_uuid() {
 ask() {
   prompt="$1"
   def="$2"
-  printf '%s [%s]: ' "$prompt" "$def"
-  read -r ans || ans=""
+  if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    printf '%s [%s]: ' "$prompt" "$def" >/dev/tty
+    read -r ans </dev/tty || ans=""
+  else
+    printf '%s [%s]: ' "$prompt" "$def" >&2
+    read -r ans || ans=""
+  fi
   [ -n "$ans" ] && printf '%s' "$ans" || printf '%s' "$def"
 }
 
@@ -90,8 +95,13 @@ ask_yes_no() {
   prompt="$1"
   def="$2"
   while :; do
-    printf '%s [%s]: ' "$prompt" "$def"
-    read -r ans || ans=""
+    if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+      printf '%s [%s]: ' "$prompt" "$def" >/dev/tty
+      read -r ans </dev/tty || ans=""
+    else
+      printf '%s [%s]: ' "$prompt" "$def" >&2
+      read -r ans || ans=""
+    fi
     [ -z "$ans" ] && ans="$def"
     case "$ans" in
       y|Y|yes|YES|是) return 0 ;;
