@@ -87,22 +87,22 @@ read_tty() {
 }
 
 ask_var() {
-  var="$1"
-  prompt="$2"
-  def="$3"
-  printf '%s [%s]: ' "$prompt" "$def" >/dev/tty
+  ASK_VAR_TARGET="$1"
+  ASK_VAR_PROMPT="$2"
+  ASK_VAR_DEFAULT="$3"
+  printf '%s [%s]: ' "$ASK_VAR_PROMPT" "$ASK_VAR_DEFAULT" >/dev/tty
   read_tty
-  [ -n "$ans" ] || ans="$def"
-  eval "$var=\$ans"
+  [ -n "$ans" ] || ans="$ASK_VAR_DEFAULT"
+  eval "$ASK_VAR_TARGET=\$ans"
 }
 
 ask_yes_no() {
-  prompt="$1"
-  def="$2"
+  ASK_YN_PROMPT="$1"
+  ASK_YN_DEFAULT="$2"
   while :; do
-    printf '%s [%s]: ' "$prompt" "$def" >/dev/tty
+    printf '%s [%s]: ' "$ASK_YN_PROMPT" "$ASK_YN_DEFAULT" >/dev/tty
     read_tty
-    [ -z "$ans" ] && ans="$def"
+    [ -z "$ans" ] && ans="$ASK_YN_DEFAULT"
     case "$ans" in
       y|Y|yes|YES|是) return 0 ;;
       n|N|no|NO|否) return 1 ;;
@@ -120,13 +120,13 @@ valid_port() {
 }
 
 ask_port_var() {
-  var="$1"
-  name="$2"
-  def="$3"
+  ASK_PORT_TARGET="$1"
+  ASK_PORT_NAME="$2"
+  ASK_PORT_DEFAULT="$3"
   while :; do
-    ask_var __PORT_VALUE "$name" "$def"
+    ask_var __PORT_VALUE "$ASK_PORT_NAME" "$ASK_PORT_DEFAULT"
     if valid_port "$__PORT_VALUE"; then
-      eval "$var=\$__PORT_VALUE"
+      eval "$ASK_PORT_TARGET=\$__PORT_VALUE"
       return
     fi
     yellow "端口必须是 1-65535 的数字"
